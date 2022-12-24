@@ -12,7 +12,9 @@ from ActorCriticNetwork import ActorCriticNetwork
 from DataGenerator import TSPDataset
 from TSPEnvironment import TSPInstanceEnv, VecEnv
 from torch.utils.tensorboard import SummaryWriter
-from apex import amp
+import datetime
+
+# from apex import amp
 
 parser = argparse.ArgumentParser()
 
@@ -101,6 +103,13 @@ parser.add_argument('--log_dir', type=str, default='logs')
 parser.add_argument('--data_dir', type=str, default='data')
 parser.add_argument('--model_dir', type=str, default='models')
 
+# -------------------------------local search operators ----------------------------------- #
+parser.add_argument("--operator", type=str, default='2opt')
+
+# -------------------------------meta alpha operator ----------------------------------- #
+parser.add_argument("--alpha", type=float, default='0.5')
+parser.add_argument("--discount", type=str, default='0.1')
+
 # unique id in case of no name given
 uid = uuid.uuid4()
 id = uid.hex
@@ -123,13 +132,12 @@ print("Name:", str(id))
 if args.gpu and torch.cuda.is_available():
     USE_CUDA = True
     print('Using GPU, {} devices available.'.format(torch.cuda.device_count()))
-    torch.cuda.set_device(args.gpu_n)
+    # torch.cuda.set_device(args.gpu_n)
     print("GPU: %s" % torch.cuda.get_device_name(torch.cuda.current_device()))
     device = torch.device("cuda")
 else:
     USE_CUDA = False
     device = torch.device("cpu")
-
 
 # if loading the model from file add it here
 if args.load_path != '':
@@ -146,8 +154,8 @@ else:
                                 args.n_points,
                                 args.n_rnn_layers,
                                 args.n_actions,
+                                args.operator,
                                 args.graph_ref)
-
 
 # define the optimizer and scheduler
 if args.rms_prop:
@@ -160,7 +168,6 @@ else:
 
 scheduler = lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.98)
 
-
 # Move policy to the GPU - Use more than one GPU if available
 if USE_CUDA:
     policy.cuda()
@@ -168,10 +175,9 @@ if USE_CUDA:
     #                               device_ids=range(torch.cuda.device_count()))
     cudnn.benchmark = True
 
-
 # Initialization
-opt_level = 'O1'
-policy, optimizer = amp.initialize(policy, optimizer, opt_level=opt_level)
+# opt_level = 'O1'
+# policy, optimizer = amp.initialize(policy, optimizer, opt_level=opt_level)
 
 if args.test_from_data:
     test_data = TSPDataset(dataset_fname=os.path.join(args.data_dir,
@@ -211,17 +217,31 @@ class buffer:
         del self.entropies[:]
 
 
-def select_action(state, hidden, buffer, best_state):
-
+def select_action(state, hidden, buffer, best_state, op):
+    # print("op",op)
     probs, action, log_probs_action, v, entropy, hidden = policy(state,
                                                                  best_state,
-                                                                 hidden)
+                                                                 hidden, op)
     buffer.log_probs.append(log_probs_action)
     buffer.states.append(state)
     buffer.actions.append(action)
     buffer.values.append(v)
     buffer.entropies.append(entropy)
+    # print("v ",v.shape)
+    # print("values ",len(buffer.values))
     return action, v, hidden
+
+
+def get_alpha(alpha, curr_epoch):
+    if curr_epoch <= 50:
+        alpha = alpha
+    elif curr_epoch <= 100:
+        alpha = alpha * 0.1
+    elif curr_epoch <= 150:
+        alpha = alpha * 0.01
+    elif curr_epoch <= 200:
+        alpha = alpha * 0.001
+    return alpha
 
 
 def learn(R, t_s, beta, zeta, count_learn, epoch):
@@ -260,30 +280,33 @@ def learn(R, t_s, beta, zeta, count_learn, epoch):
         r_mean = returns.mean()
         r_std = returns.std()
         eps = np.finfo(np.float32).eps.item()  # small number to avoid div/0
-        returns = (returns - r_mean)/(r_std + eps)
+        returns = (returns - r_mean) / (r_std + eps)
 
     # num of experiences in this "batch" of experiences
-    n_experiences = args.batch_size*args.n
+    n_experiences = args.batch_size * args.n
     # transform lists to tensor
     values = torch.stack(buffer.values)
+    print("buffer.log_probs ",type(buffer.log_probs))
     log_probs = torch.stack(buffer.log_probs).mean(2).unsqueeze(2)
     entropies = torch.stack(buffer.entropies).mean(2).unsqueeze(2)
+    # print("returns ",returns.shape)
+    # print("values ",values.shape)
     advantages = returns - values
-    p_loss = (-log_probs*advantages.detach()).mean()
-    v_loss = zeta*(returns - values).pow(2).mean()
-    e_loss = (0.9**(epoch+1))*beta*entropies.sum(0).mean()
+    p_loss = (-log_probs * advantages.detach()).mean()
+    v_loss = zeta * (returns - values).pow(2).mean()
+    e_loss = (0.9 ** (epoch + 1)) * beta * entropies.sum(0).mean()
 
     optimizer.zero_grad()
-    with amp.scale_loss(p_loss, optimizer) as scaled_p_loss:
-        scaled_p_loss.backward(retain_graph=True)
+    # with amp.scale_loss(p_loss, optimizer) as scaled_p_loss:
+    p_loss.backward(retain_graph=True)
     # p_loss.backward(retain_graph=True)
     grads = np.concatenate([p.grad.data.cpu().numpy().flatten()
                             for p in policy.parameters()
                             if p.grad is not None])
 
     r_loss = - e_loss + v_loss
-    with amp.scale_loss(r_loss, optimizer) as scaled_r_loss:
-        scaled_r_loss.backward()
+    # with amp.scale_loss(r_loss, optimizer) as scaled_r_loss:
+    r_loss.backward()
     # r_loss.backward()
     # nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
     optimizer.step()
@@ -303,19 +326,19 @@ def learn(R, t_s, beta, zeta, count_learn, epoch):
 
     count_steps += 1
 
-    writer.add_scalar("Returns", sum_returns/count_steps, count_learn)
-    writer.add_scalar("Advantage", sum_advantage/count_steps, count_learn)
-    writer.add_scalar("Loss_Actor", sum_loss_actor/count_steps, count_learn)
-    writer.add_scalar("Loss_Critic", sum_loss_critic/count_steps, count_learn)
-    writer.add_scalar("Loss_Entropy", sum_entropy/count_steps, count_learn)
-    writer.add_scalar("Loss_Total", sum_loss_total/count_steps, count_learn)
+    writer.add_scalar("Returns", sum_returns / count_steps, count_learn)
+    writer.add_scalar("Advantage", sum_advantage / count_steps, count_learn)
+    writer.add_scalar("Loss_Actor", sum_loss_actor / count_steps, count_learn)
+    writer.add_scalar("Loss_Critic", sum_loss_critic / count_steps, count_learn)
+    writer.add_scalar("Loss_Entropy", sum_entropy / count_steps, count_learn)
+    writer.add_scalar("Loss_Total", sum_loss_total / count_steps, count_learn)
 
-    writer.add_scalar("Gradients_L2", sum_grads_l2/count_steps, count_learn)
-    writer.add_scalar("Gradients_Max", sum_grads_max/count_steps, count_learn)
-    writer.add_scalar("Gradients_Var", sum_grads_var/count_steps, count_learn)
+    writer.add_scalar("Gradients_L2", sum_grads_l2 / count_steps, count_learn)
+    writer.add_scalar("Gradients_Max", sum_grads_max / count_steps, count_learn)
+    writer.add_scalar("Gradients_Var", sum_grads_var / count_steps, count_learn)
 
     epoch_train_policy_loss.update(p_loss.item(), n_experiences)
-    epoch_train_entropy_loss.update(e_loss.item()/args.n, n_experiences)
+    epoch_train_entropy_loss.update(e_loss.item() / args.n, n_experiences)
     epoch_train_value_loss.update(v_loss.item(), n_experiences)
     epoch_train_loss.update(loss.item(), n_experiences)
 
@@ -342,11 +365,9 @@ train_rwd_log = AverageMeter('train_reward')
 train_init_dist_log = AverageMeter('train_init_dist')
 train_best_dist_log = AverageMeter('train_best_dist')
 
-
 val_rwd_log = AverageMeter('val_reward')
 val_init_dist_log = AverageMeter('val_init_dist')
 val_best_dist_log = AverageMeter('val_best_dist')
-
 
 best_running_reward = 0
 val_best_dist = 1e10
@@ -384,6 +405,8 @@ for epoch in range(args.epochs):
             args.n = 10
 
     for batch_idx, batch_sample in enumerate(train_loader):
+        # print("batch_idx ",batch_idx)
+        # print("args.operator ",args.operator)
         t = 0
         b_sample = batch_sample.clone().detach().numpy()
         batch_reward = 0
@@ -401,13 +424,84 @@ for epoch in range(args.epochs):
                     env.render()
                 state = torch.from_numpy(state).float().to(device)
                 best_state = torch.from_numpy(best_state).float().to(device)
-                action, v, _ = select_action(state,
-                                             hidden,
-                                             buffer,
-                                             best_state)
+                # print("t ",t)
+                if args.operator == "metaopt-greedy":
+                    operators_list = ("2opt", "3opt", "segment_shift", "node_swap")
+                    actions_dict = dict()
+                    tmp_buffer = dict()
+                    for op in operators_list:
+                        # print("args.operator ", args.operator)
+                        # print("op ",op)
+                        probs, action, log_probs_action, v, entropy, hidden = policy(state,
+                                                                                     best_state,
+                                                                                     hidden, op)
+                        actions_dict[op] = action.cpu().numpy()
+                        tmp_buffer[op] = [probs, actions_dict, log_probs_action, v, entropy, hidden]
+                    # print("actions_dict ",actions_dict)
+                    next_state, reward, _, best_distance, _, next_best_state = \
+                        env.step(actions_dict, args.operator)
+                    buffer.log_probs.append(log_probs_action)
+                    buffer.states.append(state)
+                    buffer.actions.append(action)
+                    buffer.values.append(v)
+                    buffer.entropies.append(entropy)
+                elif args.operator == "metaopt-alpha1":
+                    operators_list = ("2opt", "3opt", "segment_shift")
+                    alpha = get_alpha(args.alpha, epoch)
+                    print("alpha ",alpha)
+                    sample_val = np.random.random_sample()
+                    print("sample_val ",sample_val)
+                    if sample_val < alpha:
+                        op = np.random.choice(operators_list)
+                        print("op ",op)
+                        action, v, _ = select_action(state,
+                                                     hidden,
+                                                     buffer,
+                                                     best_state, op)
+                        next_state, reward, _, best_distance, _, next_best_state = \
+                            env.step(action.cpu().numpy(), op,alpha)
 
-                next_state, reward, _, best_distance, _, next_best_state = \
-                    env.step(action.cpu().numpy())
+                    else:
+                        actions_dict = dict()
+                        tmp_buffer = dict()
+                        for op in operators_list:
+                            # print("args.operator ", args.operator)
+                            # print("op ",op)
+                            probs, action, log_probs_action, v, entropy, hidden = policy(state,
+                                                                                         best_state,
+                                                                                         hidden, op)
+                            actions_dict[op] = action.cpu().numpy()
+                            tmp_buffer[op] = [probs, actions_dict, log_probs_action, v, entropy, hidden]
+                        # print("actions_dict ",actions_dict)
+                        next_state, reward, _, best_distance, _, next_best_state = \
+                            env.step(actions_dict, "metaopt-greedy",alpha)
+                elif args.operator == "metaopt-alpha2":
+                    operators_list = ("2opt", "3opt", "segment_shift", "node_swap")
+                    actions_dict = dict()
+                    tmp_buffer = dict()
+                    for op in operators_list:
+                        # print("args.operator ", args.operator)
+                        # print("op ",op)
+                        probs, action, log_probs_action, v, entropy, hidden = policy(state,
+                                                                                     best_state,
+                                                                                     hidden, op)
+                        actions_dict[op] = action.cpu().numpy()
+                        tmp_buffer[op] = [probs, actions_dict, log_probs_action, v, entropy, hidden]
+                    # print("actions_dict ",actions_dict)
+                    next_state, reward, _, best_distance, _, next_best_state = \
+                        env.step(actions_dict, args.operator, alpha)
+                    buffer.log_probs.append(log_probs_action)
+                    buffer.states.append(state)
+                    buffer.actions.append(action)
+                    buffer.values.append(v)
+                    buffer.entropies.append(entropy)
+                else:
+                    action, v, _ = select_action(state,
+                                                 hidden,
+                                                 buffer,
+                                                 best_state, args.operator)
+                    next_state, reward, _, best_distance, _, next_best_state = \
+                        env.step(action.cpu().numpy(), args.operator)
 
                 buffer.rewards.append(torch.from_numpy(reward).float().to(device))
                 batch_reward += reward
@@ -458,10 +552,24 @@ for epoch in range(args.epochs):
             state = torch.from_numpy(state).float().to(device)
             best_state = torch.from_numpy(best_state).float().to(device)
             with torch.no_grad():
-                probs, action, _, _, _, _ = policy(state, best_state, hidden)
-            sum_probs += probs
-            action = action.cpu().numpy()
-            state, reward, _, best_distance, distance, best_state = env.step(action)
+                if args.operator == "metaopt-greedy":
+                    operators_list = ("2opt", "3opt", "segment_shift")
+                    actions_dict = dict()
+                    for op in operators_list:
+                        # print("args.operator ", args.operator)
+                        # print("op ",op)
+                        probs, action, log_probs_action, v, entropy, hidden = policy(state,
+                                                                                     best_state,
+                                                                                     hidden, op)
+                        # print("probs ",probs)
+                        # sum_probs += probs
+                        actions_dict[op] = action.cpu().numpy()
+                    state, reward, _, best_distance, distance, best_state = env.step(actions_dict, args.operator)
+                else:
+                    probs, action, _, _, _, _ = policy(state, best_state, hidden)
+                    # sum_probs += probs
+                    action = action.cpu().numpy()
+                    state, reward, _, best_distance, distance, best_state = env.step(action, args.operator)
             val_batch_reward += reward
             t += 1
 
@@ -469,8 +577,8 @@ for epoch in range(args.epochs):
         val_epoch_best_distances.append(best_distance)
         val_epoch_initial_distances.append(initial_distance)
 
-    avg_probs = torch.sum(sum_probs, dim=0)/(args.n_steps*args.test_size)*100
-    avg_probs = avg_probs.cpu().numpy().round(2)
+    # avg_probs = torch.sum(sum_probs, dim=0) / (args.n_steps * args.test_size) * 100
+    # avg_probs = avg_probs.cpu().numpy().round(2)
     val_epoch_reward = np.mean(val_epoch_rewards)
     val_epoch_best_distance = np.mean(val_epoch_best_distances)
     val_epoch_initial_distance = np.mean(val_epoch_initial_distances)
@@ -488,19 +596,19 @@ for epoch in range(args.epochs):
                       val_epoch_reward,
                       epoch)
     writer.add_scalar("Tour_Cost_Training",
-                      train_best_dist_log.val/10000,
+                      train_best_dist_log.val / 10000,
                       epoch)
     writer.add_scalar("Tour_Cost_Testing",
-                      val_best_dist_log.val/10000,
+                      val_best_dist_log.val / 10000,
                       epoch)
     if args.test_from_data:
-        gap = ((val_best_dist_log.val/10000)/np.mean(test_data.opt) - 1.0)*100
+        gap = ((val_best_dist_log.val / 10000) / np.mean(test_data.opt) - 1.0) * 100
         writer.add_scalar("Gap_Testing",
                           gap,
                           epoch)
     if val_rwd_log.exp_avg > best_running_reward \
-       or val_best_dist_log.val < val_best_dist\
-       or (args.test_from_data and gap < best_gap):
+            or val_best_dist_log.val < val_best_dist \
+            or (args.test_from_data and gap < best_gap):
 
         print('\033[1;37;40m Saving model...\033[0m')
         model_dir = os.path.join(args.model_dir, str(id))
@@ -510,7 +618,7 @@ for epoch in range(args.epochs):
         checkpoint = {
             'policy': policy.state_dict(),
             'optimizer': optimizer.state_dict(),
-            'amp': amp.state_dict()
+            # 'amp': amp.state_dict()
         }
         torch.save(checkpoint, os.path.join(model_dir,
                                             'pg-{}-TSP{}-epoch-{}.pt'
@@ -539,22 +647,20 @@ for epoch in range(args.epochs):
         val_init_dist_log.log(log)
         val_best_dist_log.log(log)
 
-        print('\033[1;32;40m Train - epoch:{} |rwd: {:.2f}'
-              .format(epoch, train_rwd_log.val),
-              '|running rwd: {:.2f} |best cost: {:.3f}\033[0m'
-              .format(train_rwd_log.exp_avg, train_best_dist_log.val/10000))
+        print('\033[1;32;40m Train - epoch:{} |rwd: {:.2f}'.format(epoch, train_rwd_log.val),'|running rwd: {:.2f} |best cost: {:.3f}\033[0m'.format(train_rwd_log.exp_avg, train_best_dist_log.val / 10000))
+
 
         if not args.test_from_data:
 
             print('\033[1;33;40m Valid - epoch:{} |rwd: {:.2f}'
                   .format(epoch, val_rwd_log.val),
                   '|running rwd: {:.2f} |best cost: {:.2f}\033[0m'
-                  .format(val_rwd_log.exp_avg, val_best_dist_log.val/10000))
+                  .format(val_rwd_log.exp_avg, val_best_dist_log.val / 10000))
         else:
-            print('\033[1;33;40m Valid - epoch:{} |rwd: {:.2f}'
-                  .format(epoch, val_rwd_log.val),
-                  '|running rwd: {:.2f} |best cost: {:.3f}'
-                  .format(val_rwd_log.exp_avg, val_best_dist_log.val/10000),
+            print('{} - epoch:{}'
+                  .format(datetime.datetime.now(),epoch),
+                  ' best cost: {:.3f}'
+                  .format(val_best_dist_log.val / 10000),
                   '|optimal cost: {:.3f} |gap {:.3f}\033[0m'
                   .format(np.mean(test_data.opt), gap))
 
@@ -565,6 +671,6 @@ for epoch in range(args.epochs):
 
         with open(os.path.join(args.log_dir,
                                'pg-{}-TSP{}.json'
-                               .format(str(id),
-                                       args.n_points)), 'w') as outfile:
+                                       .format(str(id),
+                                               args.n_points)), 'w') as outfile:
             json.dump(log, outfile, indent=4)

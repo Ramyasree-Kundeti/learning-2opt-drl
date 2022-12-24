@@ -32,7 +32,6 @@ class Encoder(nn.Module):
         self.n_nodes = n_nodes
 
         self.embedding = nn.Linear(input_dim, embedding_dim)
-
         self.g_embedding = nn.Linear(embedding_dim, hidden_dim)
         self.g_embedding1 = nn.Linear(hidden_dim, hidden_dim)
         self.g_embedding2 = nn.Linear(hidden_dim, hidden_dim)
@@ -66,11 +65,9 @@ class Encoder(nn.Module):
     def forward(self, input, hidden=None):
         """
         Encoder: Forward-pass
-
         :param Tensor input: Graph inputs (bs, n_nodes, 2)
         :param Tensor hidden: hidden vectors passed as inputs from t-1
         """
-
         batch_size = input.size(0)
 
         edges = utils.batch_pair_squared_dist(input, input)
@@ -95,11 +92,11 @@ class Encoder(nn.Module):
             c0 = c0.unsqueeze(0).repeat(self.n_rnn_layers, 1, 1)
 
         g_embedding = embedded_input \
-            + F.relu(torch.bmm(edges, self.g_embedding(embedded_input)))
+                      + F.relu(torch.bmm(edges, self.g_embedding(embedded_input)))
         g_embedding = g_embedding \
-            + F.relu(torch.bmm(edges, self.g_embedding1(g_embedding)))
+                      + F.relu(torch.bmm(edges, self.g_embedding1(g_embedding)))
         g_embedding = g_embedding \
-            + F.relu(torch.bmm(edges, self.g_embedding2(g_embedding)))
+                      + F.relu(torch.bmm(edges, self.g_embedding2(g_embedding)))
 
         rnn_input = g_embedding
         rnn_input_reversed = torch.flip(g_embedding, [1])
@@ -124,8 +121,8 @@ class Encoder(nn.Module):
         s_out = tanh(self.W_f(s_out)
                      + self.W_b(torch.flip(s_out_reversed, [1])))
 
-        s_hidden = (s_hidden[0]+s_hidden_reversed[0],
-                    s_hidden[1]+s_hidden_reversed[1])
+        s_hidden = (s_hidden[0] + s_hidden_reversed[0],
+                    s_hidden[1] + s_hidden_reversed[1])
 
         return s_out, s_hidden, _, g_embedding
 
@@ -152,8 +149,8 @@ class Attention(nn.Module):
 
         # Initialize vector V
         torch.nn.init.uniform_(self.V.weight,
-                               a=-1.0/math.sqrt(hidden_dim),
-                               b=1.0/math.sqrt(hidden_dim))
+                               a=-1.0 / math.sqrt(hidden_dim),
+                               b=1.0 / math.sqrt(hidden_dim))
         self._inf = float('-inf')
 
     def forward(self,
@@ -162,7 +159,6 @@ class Attention(nn.Module):
                 mask=None):
         """
         Attention - Forward-pass
-
         :param Tensor decoder_state: Hidden state h of the decoder
         :param Tensor encoder_outputs: Outputs of the encoder
         :param Boolean mask: Selection mask
@@ -187,7 +183,7 @@ class Attention(nn.Module):
         u_i = u_i.masked_fill_(mask, self._inf)
         # print("u_i after mask", u_i)
 
-        u_i = self.C*tanh(u_i/self.T)
+        u_i = self.C * tanh(u_i / self.T)
         # probs: (batch_size, n_nodes)
         probs = F.softmax(u_i, dim=1)
 
@@ -207,43 +203,64 @@ class Decoder(nn.Module):
     def __init__(self,
                  embedding_dim,
                  hidden_dim,
-                 n_actions):
+                 n_actions,
+                 operator, n_nodes):
         super(Decoder, self).__init__()
-
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.n_actions = n_actions
+        self.operator = operator
+        self.n_nodes = n_nodes
 
         self.W_0 = nn.Linear(hidden_dim, hidden_dim)
         self.W_1 = nn.Linear(hidden_dim, hidden_dim)
 
-        self.W_star = nn.Linear(hidden_dim, hidden_dim//2)
-        self.W_s = nn.Linear(hidden_dim, hidden_dim//2)
+        self.W_star = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.W_s = nn.Linear(hidden_dim, hidden_dim // 2)
 
         self.att = Attention(hidden_dim)
 
         self.mask = Parameter(torch.ones(1), requires_grad=False)
+        # print("mask1", self.mask)
         self.runner = Parameter(torch.zeros(1), requires_grad=False)
 
         self.init_dec = Parameter(torch.FloatTensor(hidden_dim),
                                   requires_grad=False)
 
-        nn.init.uniform_(self.init_dec, -1/math.sqrt(hidden_dim),
-                         1/math.sqrt(hidden_dim))
+        nn.init.uniform_(self.init_dec, -1 / math.sqrt(hidden_dim),
+                         1 / math.sqrt(hidden_dim))
 
     def forward(self, q, ref, inp, actions=None, g_emb=None, q_star=None):
-
-        batch_size = ref.size(0)
+        op = actions
+        actions = None
         n_nodes = ref.size(1)
+        batch_size = ref.size(0)
+        # for 3opt, actions are sampled from the allowed indices
+        if self.operator in ("3opt", "segment_shift") or op in ("3opt", "segment_shift"):
+            self.n_actions = 3
+        else:
+            self.n_actions = 2
+        #    if torch.cuda.is_available():
+        #        actions = torch.tensor(random.sample(mp_3opt_utils.list_indices(self.n_nodes),
+        #                                             batch_size)).cuda()
+        #    else:
+        #        actions = torch.tensor(random.sample(mp_3opt_utils.list_indices(self.n_nodes),
+        #                                             batch_size))
+        # elif self.operator == "2opt" or op == "2opt":
+        #    self.n_actions = 2
 
         if g_emb is not None:
             g_emb, _ = torch.max(g_emb, dim=1)
 
         # mask: (batch, n_nodes) filled with 1's
+        # print("batch_size, n_nodes", batch_size, n_nodes)
         mask = self.mask.repeat((batch_size, n_nodes))
-
+        # print("mask2", mask)
+        # print("mask2 size ", mask.size())
         # runner: (input_lenght) tensor filled with 0's
         runner = self.runner.repeat(n_nodes)
+        # print("runner ", runner)
+        # print("runner ", runner.size())
         # runner: (input_lenght) tensor from {0 to input_lenght-1}
         for i in range(n_nodes):
             runner.data[i] = i
@@ -268,62 +285,144 @@ class Decoder(nn.Module):
         pointers = []
         log_probs_pts = []
         entropy = []
-        for i in range(self.n_actions):
-            if i == 0:
-                # if it's the first output mask the last index
-                mask[:, -1] = 0
-            if i == 1:
-                # return the last index
-                mask[:, -1] = 1
+        if self.operator in ("3opt", "segment_shift") or op in ("3opt", "segment_shift"):
+            for i in range(self.n_actions):
+                if i == 0:
+                    # if it's the first output mask the last index
+                    mask[:, -1] = 0
+                if i == 1:
+                    mask[:, [-1]] = 1
+                    mask[:, -2] = 0
+                if i == 2:
+                    mask[:, -2] = 1
 
-            h = tanh(self.W_1(h) + self.W_0(dec_input))
+                h = tanh(self.W_1(h) + self.W_0(dec_input))
+                prob, _ = self.att(ref, h, torch.eq(mask, 0))
 
-            prob, _ = self.att(ref, h, torch.eq(mask, 0))
+                # # Masking selected inputs
+                # masked_outs: (batch, seq_len)
+                masked_prob = prob * mask
+                # torch.set_printoptions(profile="full")
+                # print("masked_prob ", masked_prob)
+                # print("masked_prob ", torch.distributions.constraints.simplex.check(masked_prob))
+                c = torch.distributions.Categorical(masked_prob, validate_args=False)
+                # print("c ", c)
+                if actions is None:
+                    indices = c.sample()
+                    log_probs_idx = c.log_prob(indices)
+                    dist_entropy = c.entropy()
+                else:
+                    indices = actions[:, i]
+                    log_probs_idx = c.log_prob(indices)
+                    dist_entropy = c.entropy()
 
-            # # Masking selected inputs
-            # masked_outs: (batch, seq_len)
-            masked_prob = prob*mask
+                # print("indices ", indices)
+                repeat_indices = indices.unsqueeze(1).expand(-1, n_nodes)
+                # print("repeat_indices ", repeat_indices)
+                # 1-pointers probs indices i.e. if idx= 4 and len = 5
+                # one_hot_pointers[0] = [0, 0 , 0 , 0 , 1]
+                # one_hot_pointers: (batch_size, seq_len)
+                one_pointers = (runner == repeat_indices).float()
+                lower_pointers = (runner <= repeat_indices).float()
 
-            c = torch.distributions.Categorical(masked_prob)
-            if actions is None:
-                indices = c.sample()
-                log_probs_idx = c.log_prob(indices)
-                dist_entropy = c.entropy()
-            else:
-                indices = actions[:, i]
-                log_probs_idx = c.log_prob(indices)
-                dist_entropy = c.entropy()
+                # print("one_pointers ", one_pointers)
+                # print("lower_pointers ", lower_pointers)
+                # Update mask to ignore seen indices
+                # (mask gets updated from 1 --> 0 for seen indices)
+                # mask: (batch_size, seq_len)
+                mask = mask * (1 - lower_pointers)
+                # print("here mask ", mask)
+                # print("mask ", mask)
+                # embbeding mask: boolean (batch size, seq_len, embbeding_dim)
+                # True for the pointed input False otherwise
+                one_pointers = one_pointers.unsqueeze(2)
+                dec_input_mask = one_pointers.expand(-1,
+                                                     -1,
+                                                     self.hidden_dim).bool()
+                masked_dec_input = inp[dec_input_mask.data]
+                dec_input = masked_dec_input.view(batch_size, self.hidden_dim)
 
-            repeat_indices = indices.unsqueeze(1).expand(-1, n_nodes)
+                # outputs: list of softmax outputs of size (1, batch_size, seq_len)
+                probs.append(prob.unsqueeze(0))
+                # print("before pointers indices ", indices)
+                pointers.append(indices.unsqueeze(1))
+                log_probs_pts.append(log_probs_idx.unsqueeze(1))
+                entropy.append(dist_entropy.unsqueeze(1))
 
-            # 1-pointers probs indices i.e. if idx= 4 and len = 5
-            # one_hot_pointers[0] = [0, 0 , 0 , 0 , 1]
-            # one_hot_pointers: (batch_size, seq_len)
-            one_pointers = (runner == repeat_indices).float()
-            lower_pointers = (runner <= repeat_indices).float()
 
-            # Update mask to ignore seen indices
-            # (mask gets updated from 1 --> 0 for seen indices)
-            # mask: (batch_size, seq_len)
-            mask = mask * (1 - lower_pointers)
+        else:
 
-            # embbeding mask: boolean (batch size, seq_len, embbeding_dim)
-            # True for the pointed input False otherwise
-            one_pointers = one_pointers.unsqueeze(2)
-            dec_input_mask = one_pointers.expand(-1,
-                                                 -1,
-                                                 self.hidden_dim).bool()
-            masked_dec_input = inp[dec_input_mask.data]
-            dec_input = masked_dec_input.view(batch_size, self.hidden_dim)
+            for i in range(self.n_actions):
+                if i == 0:
+                    # if it's the first output mask the last index
+                    mask[:, -1] = 0
+                    # print("mask3 ", mask)
+                if i == 1:
+                    # return the last index
+                    # print("before mask ", mask)
+                    mask[:, -1] = 1
+                    # print("mask4 ", mask)
+                #print("mask ", mask)
+                h = tanh(self.W_1(h) + self.W_0(dec_input))
 
-            # outputs: list of softmax outputs of size (1, batch_size, seq_len)
-            probs.append(prob.unsqueeze(0))
-            pointers.append(indices.unsqueeze(1))
-            log_probs_pts.append(log_probs_idx.unsqueeze(1))
-            entropy.append(dist_entropy.unsqueeze(1))
+                prob, _ = self.att(ref, h, torch.eq(mask, 0))
 
+                # # Masking selected inputs
+                # masked_outs: (batch, seq_len)
+                masked_prob = prob * mask
+                # print("masked_prob ", masked_prob)
+
+                # print("masked_prob ", masked_prob)
+
+                c = torch.distributions.Categorical(masked_prob)
+                if actions is None:
+                    indices = c.sample()
+                    log_probs_idx = c.log_prob(indices)
+                    dist_entropy = c.entropy()
+                else:
+                    indices = actions[:, i]
+                    log_probs_idx = c.log_prob(indices)
+                    dist_entropy = c.entropy()
+
+                # print("indices ", indices)
+                repeat_indices = indices.unsqueeze(1).expand(-1, n_nodes)
+                # print("repeat_indices ", repeat_indices)
+                # 1-pointers probs indices i.e. if idx= 4 and len = 5
+                # one_hot_pointers[0] = [0, 0 , 0 , 0 , 1]
+                # one_hot_pointers: (batch_size, seq_len)
+                one_pointers = (runner == repeat_indices).float()
+                lower_pointers = (runner <= repeat_indices).float()
+
+                # print("one_pointers ", one_pointers)
+                # print("lower_pointers ", lower_pointers)
+                # Update mask to ignore seen indices
+                # (mask gets updated from 1 --> 0 for seen indices)
+                # mask: (batch_size, seq_len)
+                mask = mask * (1 - lower_pointers)
+                # print("here mask ", mask)
+                # print("mask ", mask)
+                # embbeding mask: boolean (batch size, seq_len, embbeding_dim)
+                # True for the pointed input False otherwise
+                one_pointers = one_pointers.unsqueeze(2)
+                dec_input_mask = one_pointers.expand(-1,
+                                                     -1,
+                                                     self.hidden_dim).bool()
+                masked_dec_input = inp[dec_input_mask.data]
+                dec_input = masked_dec_input.view(batch_size, self.hidden_dim)
+
+                # outputs: list of softmax outputs of size (1, batch_size, seq_len)
+                probs.append(prob.unsqueeze(0))
+                # print("before pointers indices ", indices)
+                pointers.append(indices.unsqueeze(1))
+                log_probs_pts.append(log_probs_idx.unsqueeze(1))
+                entropy.append(dist_entropy.unsqueeze(1))
+
+        # print("probs ",probs)
         probs = torch.cat(probs).permute(1, 0, 2)
-
+        # if op == "2opt":
+        #    zeros = torch.zeros(batch_size)
+        #    log_probs_pts.append(zeros.unsqueeze(1))
+        #    entropy.append(zeros.unsqueeze(1))
         # pointers: index outputs (batch_size, n_actions)
         pointers = torch.cat(pointers, 1)
         log_probs_pts = torch.cat(log_probs_pts, 1)
@@ -333,7 +432,6 @@ class Decoder(nn.Module):
 
 
 class ActorCriticNetwork(nn.Module):
-
     """
     ActorCritic-Net
     """
@@ -345,6 +443,7 @@ class ActorCriticNetwork(nn.Module):
                  n_nodes,
                  n_rnn_layers,
                  n_actions,
+                 operator,
                  graph_ref=False):
         """
         :param int embedding_dim: Number of embbeding dimensions
@@ -353,7 +452,8 @@ class ActorCriticNetwork(nn.Module):
         :param bool bidir: Bidirectional
         :param bool batch_first: Batch first in the LSTM
         """
-
+        print("init actorpolicy")
+        print("operator ", operator)
         super(ActorCriticNetwork, self).__init__()
 
         self.encoder = Encoder(input_dim,
@@ -370,19 +470,18 @@ class ActorCriticNetwork(nn.Module):
 
         self.decoder_a = Decoder(embedding_dim,
                                  hidden_dim,
-                                 n_actions)
+                                 n_actions, operator, n_nodes)
 
-        self.W_star = nn.Linear(hidden_dim, hidden_dim//2)
-        self.W_s = nn.Linear(hidden_dim, hidden_dim//2)
+        self.W_star = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.W_s = nn.Linear(hidden_dim, hidden_dim // 2)
 
         self.decoder_c = nn.Sequential(
-                         nn.Linear(hidden_dim, hidden_dim),
-                         nn.ReLU(),
-                         nn.Linear(hidden_dim, 1))
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1))
         self.graph_ref = graph_ref
 
     def forward(self, inputs, inputs_star, hidden=None, actions=None):
-
         _, s_hidden_star, _, _ = self.encoder_star(inputs_star, hidden)
 
         s_out, s_hidden, _, g_embedding = self.encoder(inputs, hidden)
@@ -402,5 +501,4 @@ class ActorCriticNetwork(nn.Module):
         h_v = torch.cat([self.W_star(enc_h_star[0]), self.W_s(enc_h[0])],
                         dim=1)
         v = self.decoder_c(v_g + h_v)
-
         return probs, pts, log_probs_pts, v, entropies, enc_h

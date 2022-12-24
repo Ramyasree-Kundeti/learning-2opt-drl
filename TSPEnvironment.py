@@ -1,3 +1,7 @@
+import random
+import mp_3opt_utils
+import mp_node_swap_utils
+import mp_utils_segment_shift
 import utils
 import numpy as np
 from TSPGraph import TSPGraph
@@ -43,7 +47,7 @@ class TSPInstanceEnv():
 
         # distances: list of lists with all distances for points
         self.distances = utils.calculate_distances(self.state)
-        self.distances = np.rint(self.distances*10000)
+        self.distances = np.rint(self.distances * 10000)
         self.distances = self.distances.astype(int)
 
         # state: reorder the points with the random tour before starting
@@ -77,14 +81,15 @@ class TSPInstanceEnv():
         observation = self.state
         return observation
 
-    def step(self, action):
+    def step(self, action, operator,idx,alpha):
         """
         Next observation of the TSP Environment
         :param torch tensor action: int (a,b) shape: (1, 2)
         """
+        #print("step operator ",operator)
         self.current_step += 1
-
-        reward = self._take_action(action)
+        #print("action ", action)
+        reward = self._take_action(action, operator,idx,alpha)
         observation = self._next_observation()
         done = False  # only stop by number of actions
         if self.T is not None:
@@ -92,28 +97,81 @@ class TSPInstanceEnv():
 
         return observation, reward, done, self.best_state
 
-    def _take_action(self, action):
+    def _take_action(self, action, operator,idx,alpha):
         """
         Take action in the TSP Env
         :param torch.tensor action: indices (i, j) where i <= j shape: (1, 2)
         """
         # tour: new reset tour after a 2opt move
-        self.tour = utils.swap_2opt(self.tour,
-                                    action[0],
-                                    action[1])
+        # tour: new reset tour after a 2opt move
+        if operator == "2opt":
+            action = action[idx]
+            self.tour = utils.swap_2opt(self.tour,
+                                        action[0],
+                                        action[1])
 
-        # keep_tour: same 2opt move on keep_tour to keep history
-        self.new_keep_tour, self.new_tour_distance = utils.swap_2opt_new(self.keep_tour,
-                                                              action[0],
-                                                              action[1],
-                                                              self.tour_distance,
-                                                              self.distances)
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.new_keep_tour, self.new_tour_distance = utils.swap_2opt_new(self.keep_tour,
+                                                                             action[0],
+                                                                             action[1],
+                                                                             self.tour_distance,
+                                                                             self.distances)
 
+        # for 3opt,of the available 7 choices one best case is randomly choosen
+        # edges are swapped according to the best case and tour distance is updated for rewards
+        elif operator == "3opt":
+            action = action[idx]
+            best_case = [1, 2, 3, 4, 5, 6, 7]
+            self.tour = mp_3opt_utils.swapEdgesThreeOPT(self.tour,
+                                                        action[0],
+                                                        action[1],
+                                                        action[2],
+                                                        random.sample(best_case, 1)[0])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.new_tour_distance = mp_3opt_utils. \
+                route_distance(self.tour, self.distances)
+            self.new_keep_tour = self.tour
+        # segment shift
+        elif operator == "segment_shift":
+            action = action[idx]
+            self.tour = mp_utils_segment_shift.swapEdgesSegmentShiftOPT(self.tour,
+                                                                        action[0],
+                                                                        action[1],
+                                                                        action[2])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.new_tour_distance = mp_utils_segment_shift. \
+                route_distance(self.tour, self.distances)
+            self.new_keep_tour = self.tour
+
+        # node swap
+        elif operator == "node_swap":
+            action = action[idx]
+            self.tour = mp_node_swap_utils.swapNodes(self.tour,
+                                                     action[0],
+                                                     action[1])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.new_tour_distance = mp_node_swap_utils. \
+                route_distance(self.tour, self.distances)
+            self.new_keep_tour = self.tour
+
+        elif operator == "metaopt-greedy":
+            self.tour, self.new_keep_tour, self.new_tour_distance = self.update_meta_greedy(action, idx)
+
+        elif operator == "metaopt-alpha2":
+            self.tour, self.new_keep_tour, self.new_tour_distance = self.update_meta_alpha2(action, idx,alpha)
+
+        #print("self.tour ", self.tour)
+        if len(self.tour)>50:
+            self.tour = self.tour[:-1]
         self.state = self.state[self.tour, :]
+        #print("self.state ", self.state)
         self.tour_distance = self.new_tour_distance.copy()
-        if (self.current_best_distance > self.tour_distance):
+        if self.current_best_distance > self.tour_distance:
             reward = self.current_best_distance - self.tour_distance
-            reward = round(min(reward/10000, 1.0), 4)
+            reward = round(min(reward / 10000, 1.0), 4)
             self.current_best_distance = self.tour_distance
             self.current_best_tour = self.new_keep_tour.copy()
             self.best_state = np.copy(self.state)
@@ -131,6 +189,178 @@ class TSPInstanceEnv():
 
         return reward
 
+    def update_meta_greedy(self, action_dict, idx):
+
+        self.meta_tour_distance = 500000
+        for key in action_dict:
+            # tour: new reset tour after a 2opt move
+            #print("Meta operator greedy,key,idx ", key,idx)
+            if key == "2opt":
+                action = action_dict[key][idx]
+                # print("action ", action)
+                self.current_tour = utils.swap_2opt(self.tour,
+                                                    action[0],
+                                                    action[1])
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.current_new_keep_tour, self.current_tour_distance = utils.swap_2opt_new(self.keep_tour,
+                                                                                             action[0],
+                                                                                             action[1],
+                                                                                             self.tour_distance,
+                                                                                             self.distances)
+                # print("self.current_tour_distance ", self.current_tour_distance)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_new_keep_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+
+            # for 3opt,of the available 7 choices one best case is randomly choosen
+            # edges are swapped according to the best case and tour distance is updated for rewards
+            elif key == "3opt":
+                best_case = [1, 2, 3, 4, 5, 6, 7]
+                action = action_dict[key][idx]
+                # print("action ",action)
+                self.current_tour = mp_3opt_utils.swapEdgesThreeOPT(self.tour,
+                                                                    action[0],
+                                                                    action[1],
+                                                                    action[2],
+                                                                    random.sample(best_case, 1)[0])
+
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.current_tour_distance = mp_3opt_utils. \
+                    route_distance(self.tour, self.distances)
+                # print("self.current_tour_distance ", self.current_tour_distance)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+            elif key == "segment_shift":
+                action = action_dict[key][idx]
+                self.current_tour = mp_utils_segment_shift.swapEdgesSegmentShiftOPT(self.tour,
+                                                                            action[0],
+                                                                            action[1],
+                                                                            action[2])
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.new_tour_distance = mp_utils_segment_shift. \
+                    route_distance(self.current_tour, self.distances)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+
+            # node swap
+            elif key == "node_swap":
+                action = action_dict[key][idx]
+                self.current_tour = mp_node_swap_utils.swapNodes(self.tour,
+                                                         action[0],
+                                                         action[1])
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.new_tour_distance = mp_node_swap_utils. \
+                    route_distance(self.current_tour, self.distances)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+        return self.tour, self.new_keep_tour, self.new_tour_distance
+
+    def update_meta_alpha2(self, action_dict, idx,alpha):
+
+        self.meta_tour_distance = 500000
+        sample_val = np.random.random_sample()
+        move = "best"
+        if sample_val < alpha:
+            move = "second_best"
+        for key in action_dict:
+            # tour: new reset tour after a 2opt move
+            if key == "2opt":
+                action = action_dict[key][idx]
+                # print("action ", action)
+                self.current_tour = utils.swap_2opt(self.tour,
+                                                    action[0],
+                                                    action[1])
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.current_new_keep_tour, self.current_tour_distance = utils.swap_2opt_new(self.keep_tour,
+                                                                                             action[0],
+                                                                                             action[1],
+                                                                                             self.tour_distance,
+                                                                                             self.distances)
+                # print("self.current_tour_distance ", self.current_tour_distance)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_new_keep_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+
+            # for 3opt,of the available 7 choices one best case is randomly choosen
+            # edges are swapped according to the best case and tour distance is updated for rewards
+            elif key == "3opt":
+                best_case = [1, 2, 3, 4, 5, 6, 7]
+                action = action_dict[key][idx]
+                # print("action ",action)
+                self.current_tour = mp_3opt_utils.swapEdgesThreeOPT(self.tour,
+                                                                    action[0],
+                                                                    action[1],
+                                                                    action[2],
+                                                                    random.sample(best_case, 1)[0])
+
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.current_tour_distance = mp_3opt_utils. \
+                    route_distance(self.tour, self.distances)
+                # print("self.current_tour_distance ", self.current_tour_distance)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+            elif key == "segment_shift":
+                action = action_dict[key][idx]
+                self.current_tour = mp_utils_segment_shift.swapEdgesSegmentShiftOPT(self.tour,
+                                                                            action[0],
+                                                                            action[1],
+                                                                            action[2])
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.new_tour_distance = mp_utils_segment_shift. \
+                    route_distance(self.current_tour, self.distances)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+
+            # node swap
+            elif key == "node_swap":
+                action = action_dict[key][idx]
+                self.current_tour = mp_node_swap_utils.swapNodes(self.tour,
+                                                         action[0],
+                                                         action[1])
+
+                # keep_tour: same 2opt move on keep_tour to keep history
+                self.new_tour_distance = mp_node_swap_utils. \
+                    route_distance(self.current_tour, self.distances)
+                if self.current_tour_distance < self.meta_tour_distance:
+                    # print("operator ", key)
+                    self.meta_tour_distance = self.current_tour_distance
+                    self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                                                                            self.current_tour, \
+                                                                            self.current_tour_distance
+        return self.tour, self.new_keep_tour, self.new_tour_distance
 
     def _render_to_file(self, filename='render.txt'):
         """
@@ -214,7 +444,7 @@ class VecEnv():
 
         return observations, self.best_distances.copy(), best_observations
 
-    def step(self, actions):
+    def step(self, actions, operator,alpha):
 
         observations = np.ndarray((self.n_envs, self.n_nodes, 2))
         best_observations = np.ndarray((self.n_envs, self.n_nodes, 2))
@@ -222,8 +452,9 @@ class VecEnv():
         dones = np.ndarray((self.n_envs, 1), dtype=bool)
 
         idx = 0
+        #print("operator ",operator)
         for env in self.envs:
-            obs, reward, done, best_obs = env.step(actions[idx])
+            obs, reward, done, best_obs = env.step(actions, operator,idx,alpha)
             self.best_distances[idx] = env.current_best_distance
             self.distances[idx] = env.tour_distance
             observations[idx] = obs
@@ -234,8 +465,8 @@ class VecEnv():
 
         self.current_step += 1
         return observations, rewards, dones, \
-            self.best_distances.copy(), self.distances.copy(), \
-            best_observations
+               self.best_distances.copy(), self.distances.copy(), \
+               best_observations
 
     def render(self, mode='live', window_size=1, time=0, **kwargs):
 
