@@ -81,7 +81,7 @@ class TSPInstanceEnv():
         observation = self.state
         return observation
 
-    def step(self, action, operator,idx,alpha):
+    def step(self, action, operator,idx,alpha,n_nodes):
         """
         Next observation of the TSP Environment
         :param torch tensor action: int (a,b) shape: (1, 2)
@@ -89,7 +89,7 @@ class TSPInstanceEnv():
         #print("step operator ",operator)
         self.current_step += 1
         #print("action ", action)
-        reward = self._take_action(action, operator,idx,alpha)
+        reward = self._take_action(action, operator,idx,alpha,n_nodes)
         observation = self._next_observation()
         done = False  # only stop by number of actions
         if self.T is not None:
@@ -97,7 +97,7 @@ class TSPInstanceEnv():
 
         return observation, reward, done, self.best_state
 
-    def _take_action(self, action, operator,idx,alpha):
+    def _take_action(self, action, operator,idx,alpha,n_nodes):
         """
         Take action in the TSP Env
         :param torch.tensor action: indices (i, j) where i <= j shape: (1, 2)
@@ -160,8 +160,14 @@ class TSPInstanceEnv():
         elif operator == "metaopt-greedy":
             self.tour, self.new_keep_tour, self.new_tour_distance = self.update_meta_greedy(action, idx)
 
+        elif operator == "metaopt-alpha1":
+            self.tour, self.new_keep_tour, self.new_tour_distance = self.update_meta_alpha1(action, idx,alpha)
+
         elif operator == "metaopt-alpha2":
             self.tour, self.new_keep_tour, self.new_tour_distance = self.update_meta_alpha2(action, idx,alpha)
+
+        elif operator == "parameterization":
+            self.tour, self.new_keep_tour, self.new_tour_distance = self.update_parameterization(action, idx, n_nodes)
 
         #print("self.tour ", self.tour)
         if len(self.tour)>50:
@@ -360,6 +366,90 @@ class TSPInstanceEnv():
                     self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
                                                                             self.current_tour, \
                                                                             self.current_tour_distance
+        return self.tour, self.new_keep_tour, self.new_tour_distance
+
+    def update_parameterization(self, action_dict, idx, n_nodes):
+
+        self.meta_tour_distance = 500000
+        action = action_dict["parameterization"][idx]
+        # 2opt move
+        # print("action ",action)
+        if action[3] == n_nodes - 4:
+            # print("2opt ")
+            self.current_tour = utils.swap_2opt(self.tour,
+                                                action[0],
+                                                action[1])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.current_new_keep_tour, self.current_tour_distance = utils.swap_2opt_new(self.keep_tour,
+                                                                                         action[0],
+                                                                                         action[1],
+                                                                                         self.tour_distance,
+                                                                                         self.distances)
+            # print("self.current_tour_distance ", self.current_tour_distance)
+            if self.current_tour_distance < self.meta_tour_distance:
+                # print("operator ", key)
+                self.meta_tour_distance = self.current_tour_distance
+                self.new_keep_tour, self.tour, self.new_tour_distance = self.current_new_keep_tour, \
+                    self.current_tour, \
+                    self.current_tour_distance
+
+        # for 3opt,of the available 7 choices one best case is randomly choosen
+        # edges are swapped according to the best case and tour distance is updated for rewards
+        elif action[3] == n_nodes - 3:
+            # print("3opt")
+            best_case = [1, 2, 3, 4, 5, 6, 7]
+            # print("action ",action)
+            self.current_tour = mp_3opt_utils.swapEdgesThreeOPT(self.tour,
+                                                                action[0],
+                                                                action[1],
+                                                                action[2],
+                                                                random.sample(best_case, 1)[0])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.current_tour_distance = mp_3opt_utils. \
+                route_distance(self.current_tour, self.distances)
+            # print("self.current_tour_distance ", self.current_tour_distance)
+            if self.current_tour_distance < self.meta_tour_distance:
+                # print("operator ", key)
+                self.meta_tour_distance = self.current_tour_distance
+                self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                    self.current_tour, \
+                    self.current_tour_distance
+        elif action[3] == n_nodes - 2:
+            # print("shift segement")
+            self.current_tour = mp_utils_segment_shift.swapEdgesSegmentShiftOPT(self.tour,
+                                                                                action[0],
+                                                                                action[1],
+                                                                                action[2])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.current_tour_distance = mp_utils_segment_shift. \
+                route_distance(self.current_tour, self.distances)
+            if self.current_tour_distance < self.meta_tour_distance:
+                # print("operator ", key)
+                self.meta_tour_distance = self.current_tour_distance
+                self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                    self.current_tour, \
+                    self.current_tour_distance
+
+            # node swap
+        elif action[3] == n_nodes - 1:
+            # print("node swap")
+            self.current_tour = mp_node_swap_utils.swapNodes(self.tour,
+                                                             action[0],
+                                                             action[1])
+
+            # keep_tour: same 2opt move on keep_tour to keep history
+            self.current_tour_distance = mp_node_swap_utils. \
+                route_distance(self.current_tour, self.distances)
+            if self.current_tour_distance < self.meta_tour_distance:
+                # print("operator ", key)
+                self.meta_tour_distance = self.current_tour_distance
+                self.new_keep_tour, self.tour, self.new_tour_distance = self.current_tour, \
+                    self.current_tour, \
+                    self.current_tour_distance
+        # print("self.tour, self.new_keep_tour, self.new_tour_distance ",self.tour, self.new_keep_tour, self.new_tour_distance)
         return self.tour, self.new_keep_tour, self.new_tour_distance
 
     def _render_to_file(self, filename='render.txt'):

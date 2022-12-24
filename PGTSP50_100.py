@@ -439,14 +439,14 @@ for epoch in range(args.epochs):
                         tmp_buffer[op] = [probs, actions_dict, log_probs_action, v, entropy, hidden]
                     # print("actions_dict ",actions_dict)
                     next_state, reward, _, best_distance, _, next_best_state = \
-                        env.step(actions_dict, args.operator)
+                        env.step(actions_dict, args.operator,0,args.n_points)
                     buffer.log_probs.append(log_probs_action)
                     buffer.states.append(state)
                     buffer.actions.append(action)
                     buffer.values.append(v)
                     buffer.entropies.append(entropy)
                 elif args.operator == "metaopt-alpha1":
-                    operators_list = ("2opt", "3opt", "segment_shift")
+                    operators_list = ("2opt", "3opt", "segment_shift","node_swap")
                     alpha = get_alpha(args.alpha, epoch)
                     print("alpha ",alpha)
                     sample_val = np.random.random_sample()
@@ -459,7 +459,7 @@ for epoch in range(args.epochs):
                                                      buffer,
                                                      best_state, op)
                         next_state, reward, _, best_distance, _, next_best_state = \
-                            env.step(action.cpu().numpy(), op,alpha)
+                            env.step(action.cpu().numpy(), op,alpha,args.n_points)
 
                     else:
                         actions_dict = dict()
@@ -474,7 +474,7 @@ for epoch in range(args.epochs):
                             tmp_buffer[op] = [probs, actions_dict, log_probs_action, v, entropy, hidden]
                         # print("actions_dict ",actions_dict)
                         next_state, reward, _, best_distance, _, next_best_state = \
-                            env.step(actions_dict, "metaopt-greedy",alpha)
+                            env.step(actions_dict, "metaopt-greedy",alpha,args.n_points)
                 elif args.operator == "metaopt-alpha2":
                     operators_list = ("2opt", "3opt", "segment_shift", "node_swap")
                     actions_dict = dict()
@@ -489,19 +489,28 @@ for epoch in range(args.epochs):
                         tmp_buffer[op] = [probs, actions_dict, log_probs_action, v, entropy, hidden]
                     # print("actions_dict ",actions_dict)
                     next_state, reward, _, best_distance, _, next_best_state = \
-                        env.step(actions_dict, args.operator, alpha)
+                        env.step(actions_dict, args.operator, alpha,args.n_points)
                     buffer.log_probs.append(log_probs_action)
                     buffer.states.append(state)
                     buffer.actions.append(action)
                     buffer.values.append(v)
                     buffer.entropies.append(entropy)
+                elif args.operator == "parameterization":
+                    actions_dict = dict()
+                    tmp_buffer = dict()
+                    action, v, _ = select_action(state, hidden, buffer, best_state, args.operator)
+                    actions_dict["parameterization"] = action.cpu().numpy()
+                    # tmp_buffer[op] = [probs, action, log_probs_action, v, entropy, hidden]
+
+                    next_state, reward, _, best_distance, _, next_best_state = \
+                        env.step(actions_dict, args.operator,0, args.n_points)
                 else:
                     action, v, _ = select_action(state,
                                                  hidden,
                                                  buffer,
                                                  best_state, args.operator)
                     next_state, reward, _, best_distance, _, next_best_state = \
-                        env.step(action.cpu().numpy(), args.operator)
+                        env.step(action.cpu().numpy(), args.operator,0,args.n_points)
 
                 buffer.rewards.append(torch.from_numpy(reward).float().to(device))
                 batch_reward += reward
@@ -553,7 +562,7 @@ for epoch in range(args.epochs):
             best_state = torch.from_numpy(best_state).float().to(device)
             with torch.no_grad():
                 if args.operator == "metaopt-greedy":
-                    operators_list = ("2opt", "3opt", "segment_shift")
+                    operators_list = ("2opt", "3opt", "segment_shift","node_swap")
                     actions_dict = dict()
                     for op in operators_list:
                         # print("args.operator ", args.operator)
@@ -564,12 +573,37 @@ for epoch in range(args.epochs):
                         # print("probs ",probs)
                         # sum_probs += probs
                         actions_dict[op] = action.cpu().numpy()
-                    state, reward, _, best_distance, distance, best_state = env.step(actions_dict, args.operator)
+                    state, reward, _, best_distance, distance, best_state = env.step(actions_dict, args.operator,0,args.n_points)
+                elif args.operator == "metaopt-alpha1":
+                    operators_list = ("2opt", "3opt", "segment_shift","node_swap")
+                    alpha = get_alpha(args.alpha, epoch)
+                    print("alpha ",alpha)
+                    sample_val = np.random.random_sample()
+                    print("sample_val ",sample_val)
+                    if sample_val < alpha:
+                        op = np.random.choice(operators_list)
+                        print("op ",op)
+                        probs, action, log_probs_action, v, entropy, hidden = policy(state,
+                                                                                     best_state,
+                                                                                     hidden, op)
+                        actions_dict[op] = action.cpu().numpy()
+                        state, reward, _, best_distance, distance, best_state = env.step(actions_dict, args.operator, 0,
+                                                                                         args.n_points)
+                elif args.operator == "parameterization":
+                    actions_dict = dict()
+                    state1 = F.pad(state, pad=(0, 0, 0, 4))
+                    probs, action, log_probs_action, v, entropy, hidden = policy(state1,
+                                                                                 best_state,
+                                                                                 hidden, args.operator)
+                    actions_dict["parameterization"] = action.cpu().numpy()
+
+                    next_state, reward, _, best_distance, _, next_best_state = \
+                        env.step(actions_dict, args.operator,0, args.n_points)
                 else:
                     probs, action, _, _, _, _ = policy(state, best_state, hidden)
                     # sum_probs += probs
                     action = action.cpu().numpy()
-                    state, reward, _, best_distance, distance, best_state = env.step(action, args.operator)
+                    state, reward, _, best_distance, distance, best_state = env.step(action, args.operator,0,args.n_points)
             val_batch_reward += reward
             t += 1
 
